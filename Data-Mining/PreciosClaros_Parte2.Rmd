@@ -1,0 +1,976 @@
+---
+title: "TP02"
+author: "Biam!"
+date: "23/6/2019"
+output: html_document
+---
+Las librerías a usar.<br>
+```{r Librerías, include=FALSE}
+library(jsonlite)
+library(geojsonio)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(wesanderson)
+library(viridisLite)
+library(rgdal)
+library(ggplot2)
+library(rgeos)
+library(reshape2)
+library(arules)
+library(tm)
+library(wordcloud)
+library(RColorBrewer)
+library(arulesViz)
+library(DT)
+library(htmlwidgets)
+```
+
+Paletas de colores.<br>
+```{r Paletas de colores}
+ZissouD = wes_palette("Zissou1",5, type = "discrete")
+ZissouC = wes_palette("Zissou1",50, type = "continuous")
+DarjD = wes_palette("Darjeeling1", 5, type = "discrete")
+```
+
+Importación de datos desde archivos json.<br>
+```{r Importación de archivos json, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+sucursales = stream_in(file("sucursales.json",open="r"))
+productos = stream_in(file("productos.json",open="r"))
+precios = stream_in(file("precios.json",open="r"))
+```
+
+Importación de datasets extra.<br>
+```{r Importación de archivos csv, eval=FALSE, include=FALSE}
+# Importamos los datos de las mediciones y de los barrios
+mediciones = read.csv("./Datasets adicionales/mediciones.csv")
+sucursales = read.csv("./Datasets adicionales/sucursales_barrios.csv")
+productos = read.csv("./Datasets adicionales/productos_categoria.csv")
+inflacion = read.csv("./Datasets adicionales/inflacion.csv")
+precio_metros2 = read.csv("./barrios/precio_metro.csv")
+```
+
+Unión de todos los datasets.<br>
+```{r Unión de todas las tablas, eval=FALSE, include=FALSE}
+# Agregamos la info de los productos al df "precios"
+data1 = inner_join(precios, productos, by = c("producto" = "id"))
+
+#Agregamos la info de sucursales a "data1"
+data2 = inner_join(data1, sucursales, by = c("sucursal" = "id"))
+
+# Borramos "data1", nos quedamos con "data2"
+rm(data1)
+
+# Armo un dataset con la info que me interesa. Se identificará cada consulta con el id del df "precios"
+tp2_data = select(data2, `_id`, "producto", "nombre", "Categoria", "marca", "presentacion", "precio", "medicion", "sucursal", "sucursalTipo", "banderaDescripcion", "comercioRazonSocial", "direccion", "barrio")
+```
+
+
+<h3>Tratamiento de precios</h3>
+
+1. Pasar las mediciones de precios de productos por sucursal a formato columnar. En este formato cada fila representará un producto de una sucursal con 10 columnas asociadas a los precios en cada medición.<br>
+```{r Mediciones en formato columnar}
+tp2_reshape = dcast(tp2_data, producto + nombre + Categoria + marca + presentacion + sucursal + sucursalTipo + banderaDescripcion + comercioRazonSocial + direccion + barrio ~ medicion, fun.aggregate=NULL, value.var="precio")
+```
+
+2. Luego de aplicar el paso anterior, algunos valores de precios contendrán faltantes. Se propone imputar los valores tomando, por ejemplo, el promedio de las mediciones inmediatamente contiguas a la medición del faltante. Este procedimiento mantendría faltantes en caso que ambas mediciones aledañas contengan faltantes.<br>
+
+```{r Reemplazo NA en m1 por valor en m2}
+# Reemplaza los NA en la medición 1 por el valor de la medición 2
+i = which(is.na(tp2_reshape$`1`)) # Devuelve número de filas con NA
+tp2_reshape[i,12] = tp2_reshape[i,13] # reemplaza los nulos en la primer medición por el valor en la segunda
+```
+
+```{r Reemplazo de NA por el promedio de adyacentes}
+# Reemplaza NA entre la columna 13 y la 20 (valores d las mediciones 2 a 9) por el promedio de sus adyacentes
+for (j in 0:7) {
+  ii = which(is.na(tp2_reshape[,13+j])) 
+	tp2_reshape[ii,13+j] = (tp2_reshape[ii,13+j-1]+tp2_reshape[ii,13+j+1])/2
+}
+```
+
+```{r Reemplazo de NA en m10 por el valor de m9}
+# Reemplazo los NA de la medición 10 por el valor de la medición 9
+iii = which(is.na(tp2_reshape$`10`))
+tp2_reshape[iii,21] = tp2_reshape[iii,20]
+```
+
+3. Generar cuatro nuevas columnas de precios con los precios promedios de cada período descripto en la Tabla 1. Además se podría generar una columna con el promedio total de todas las mediciones.<br>
+```{r Promedios por periodo y total}
+# Promedios por periodo y total
+tp2_reshape =
+(
+tp2_reshape %>%
+  mutate(periodo1 = rowMeans(select(., "1","2","3")), periodo2 = rowMeans(select(., "4","5")), periodo3 = rowMeans(select(., "6","7")), periodo4 = rowMeans(select(., "8","9","10")), promedio = rowMeans(select(., "1","2","3","4","5","6","7","8","9","10")))
+)
+```
+
+4. Eliminar a los casos que contengan faltantes en las nuevas columnas de precios calculadas.<br>
+```{r Eliminación de faltantes}
+# Eliminamos faltantes
+tp2_reshape = na.omit(tp2_reshape)
+```
+
+5. Calcular variaciones porcentuales intra-período y la variación total entre el precio del primer y último período. Se tomará como variación de precio a la siguiente fórmula: (nuevo-inicial)/inicial.<br>
+```{r Renombro las columnas}
+# Renombro las columnas de las mediciones
+tp2_reshape =
+(
+  tp2_reshape %>% rename(
+    "m1" = "1",
+    "m2" = "2",
+    "m3" = "3",
+    "m4" = "4",
+    "m5" = "5",
+    "m6" = "6",
+    "m7" = "7",
+    "m8" = "8",
+    "m9" = "9",
+    "m10" = "10"
+        )
+)
+```
+
+```{r Variación intra periodo y total}
+# Variaciones intra periodo y total
+tp2_reshape = (
+tp2_reshape %>%
+dplyr::mutate(variacion1 = (m3-m1)/m1, variacion2 = (m5-m4)/m4, variacion3 = (m7-m6)/m6, variacion4 = (m10-m8)/m8, variacionT = (m10-m1)/m1)
+)
+```
+
+6. Discretizar las variaciones calculadas en el paso anterior, por ejemplo según losrangos propuestos en la Tabla 2.<br>
+```{r Discretizacion variación}
+# Discretizo todo junto en el punto 9
+```
+
+7. Para tener un valor comparable de precios por producto en distintas sucursales se calculará la media por productos en cada una de las variables de precios generadas en el paso 3.
+```{r Media por producto}
+tp2_reshape = (
+tp2_reshape %>%
+ group_by(producto, nombre) %>%
+ dplyr::mutate(media_prod1 = mean(periodo1), media_prod2 = mean(periodo2), media_prod3 = mean(periodo3), media_prod4 = mean(periodo4), media_prodT = mean(promedio))
+) 
+```
+
+8. Utilizando los promedios calculados en el paso anterior se deberá calcular el precio relativo sobre las variables de precios generadas en el paso 3. El precio relativo se calculará siguiendo la siguiente fórmula: precio relativo = (precio en sucursal - precio medio producto)/precio medio producto.<br>
+```{r Precio relativo}
+tp2_reshape = (
+tp2_reshape %>%
+ group_by(sucursal, producto) %>%
+ dplyr::mutate(precio_rel1 = (periodo1-media_prod1)/periodo1, precio_rel2 = (periodo2-media_prod2)/periodo2, precio_rel3 = (periodo3-media_prod3)/periodo3, precio_rel4 = (periodo4-media_prod4)/periodo4, precio_rel_medio = (promedio-media_prodT)/promedio)
+)
+```
+
+Agregamos precio por metro cuadrado del barrio
+```{r Precio metro cuadrado}
+# Agregamos el precio por metro cuadrado
+tp2_reshape = inner_join(tp2_reshape, precio_metros2[1:2], by = c("barrio" = "BARRIO"))
+
+# Renombramos la columna PRECIO
+tp2_reshape = (tp2_reshape %>% rename(precio_m2 = PRECIO))
+```
+
+Agregamos una columna de "canasta"
+```{r Target canastas}
+# Armamos canasta de alimentos
+target_rec = c("Agua","Infusiones","Leche", "Leche en polvo", "Arroz","Harinas","Verduras congeladas")
+target_mod = c("Conservas","Quesos","Pastas","Yogur","Aceite", "Aceite de oliva", "Manteca","Endulzantes")
+target_evi = c("Bebidas sin alcohol", "Bebidas deportivas", "Jugos en polvo", "Carnes congeladas", "Otros congelados", "Cereales azucarados", "Panificados","Salsas")
+```
+
+```{r Canasta de productos}
+# Agregamos la columna "canasta"
+tp2_reshape = mutate(tp2_reshape, canasta = ifelse(Categoria %in% target_rec, "recomendado",
+                                            ifelse(Categoria %in% target_mod, "moderado",
+                                            ifelse(Categoria %in% target_evi, "evitar", NA))))
+```
+
+```{r Ubicación de sucursales}
+# Agregamos la columna "ubicacion"
+tp2_reshape = dplyr::mutate(tp2_reshape, ubicacion = ifelse(grepl('Av.',direccion), 'avenida', "calle"))
+tp2_reshape$ubicacion = as.factor(tp2_reshape$ubicacion)
+```
+
+9. Discretizar las variaciones calculadas en el paso anterior según los rangos propuestos en la tabla 3.<br>
+```{r Discretizacion}
+# Variación
+intervalos = c(-Inf, -0.05, -0.02, -0.005, 0.005, 0.05, 0.1, Inf)
+etiquetas = c("disminucion fuerte", "disminucion media", "disminucion leve", "mantiene", "aumento leve", "aumento medio", "aumento fuerte")
+
+# Precio
+intervalos1 = c(-Inf, -0.1, -0.05, -0.01, 0.01, 0.05, 0.1, Inf)
+etiquetas1 = c("muy barato", "medianamente barato", "levemente barato", "medio", "levemente caro", "medianamente caro", "muy caro")
+
+# Preio m2
+intervalos2 = c(-Inf, 1000, 2000, 4000, 5000, 6000, Inf)
+etiquetas2 = c("barato", "medianamente barato", "medio", "medianamente caro", "caro", "muy caro")
+
+tp2_disc = tp2_reshape
+tp2_disc$variacion1 = discretize(tp2_disc$variacion1, method = "fixed", breaks = intervalos, labels = etiquetas)
+tp2_disc$variacion2 = discretize(tp2_disc$variacion2, method = "fixed", breaks = intervalos, labels = etiquetas)
+tp2_disc$variacion3 = discretize(tp2_disc$variacion3, method = "fixed", breaks = intervalos, labels = etiquetas)
+tp2_disc$variacion4 = discretize(tp2_disc$variacion4, method = "fixed", breaks = intervalos, labels = etiquetas)
+tp2_disc$variacionT = discretize(tp2_disc$variacionT, method = "fixed", breaks = intervalos, labels = etiquetas)
+
+tp2_disc$precio_rel1 = discretize(tp2_disc$precio_rel1, method = "fixed", breaks = intervalos1, labels = etiquetas1)
+tp2_disc$precio_rel2 = discretize(tp2_disc$precio_rel2, method = "fixed", breaks = intervalos1, labels = etiquetas1)
+tp2_disc$precio_rel3 = discretize(tp2_disc$precio_rel3, method = "fixed", breaks = intervalos1, labels = etiquetas1)
+tp2_disc$precio_rel4 = discretize(tp2_disc$precio_rel4, method = "fixed", breaks = intervalos1, labels = etiquetas1)
+tp2_disc$precio_rel_medio = discretize(tp2_disc$precio_rel_medio, method = "fixed", breaks = intervalos1, labels = etiquetas1)
+
+tp2_disc$precio_m2 = discretize(tp2_disc$precio_m2, method = "fixed", breaks = intervalos2, labels = etiquetas2)
+```
+
+```{r Solo variables discretas}
+# Nos quedamos sólo con las variables discretas
+tp2 = select(tp2_disc,-c(12:26,32:36))
+```
+
+
+
+<h3>Tratamiento de coordenadas geográficas</h3>
+
+Utilizando las coordenadas geográficas presentes en el conjunto de datos sucursales.json se podría obtener el barrio en donde se sitúa cada sucursal. Para esto deberá integrarse los datos de sucursales con datos externos con las delimitaciones geográficas de los barrios de Buenos Aires.<br>
+```{r Mapa de CABA para el geoplot desde geojson, eval=FALSE, include=FALSE}
+caba = geojson_read("./barrios/barrios.geojson", what = "sp")
+caba@data$id = rownames(caba@data)
+caba.points = ggplot2::fortify(caba, region="id")
+caba.df = plyr::join(caba.points, caba@data, by="id")
+```
+
+```{r Mapa de CABA con precios por metro cuadrado, eval=FALSE, include=FALSE}
+# Cambiamos de factor a character
+caba.df %>% mutate_if(is.factor, as.character) -> caba.df
+
+#Reemplazamos Nuñez mal escrito por NUNEZ
+caba.df$BARRIO[caba.df$BARRIO=="NUÃ‘EZ"] = "NUNEZ"
+
+# Le agregamos el precio por metro cuadrado de cada barrio
+caba.df = plyr::join(caba.df, precio_metros2, by="BARRIO")
+```
+
+```{r Centro de cada polígono, eval=FALSE, include=FALSE}
+# Dataframe con los centros de cada polígono (barrio)
+caba.centros = as.data.frame(SpatialPointsDataFrame(gCentroid(caba, byid=TRUE), caba@data, match.ID=FALSE))
+
+centros = ggplot(caba.centros, aes(x=y, y=x, label=BARRIO))+
+  geom_point(size=0, color="white") +
+  geom_text(aes(label=BARRIO),hjust=0, vjust=0, size = 2, color = "grey")
+```
+
+```{r Heatmap CABA precio m2, eval=FALSE, include=FALSE}
+# El mapa de CABA coloreado según precio del metro cuadrado
+map.caba = ggplot(caba.df) + 
+  aes(long,lat,group=group, fill=PRECIO) + 
+  geom_polygon() +
+  geom_path(color="white") +
+  coord_equal() +
+  xlab("Longitud") +
+  ylab("Latitud") +
+  scale_fill_gradient(low = "azure", high = "dimgrey", name = "Precio m2 (USD)")
+  #scale_fill_gradientn(colours = ZissouC)
+  #scale_fill_viridis_c(option="magma")
+
+# El mapa de arriba pero con los nombres de los barrios
+map.caba1 = map.caba + geom_text(data=caba.centros, aes(x,y,label=BARRIO), inherit.aes = FALSE, hjust=0, vjust=0, size = 2, color = "black")
+
+map.caba1
+```
+
+
+
+<h3>Tratamiento de textos de descripciones de productos</h3>
+
+El conjunto de datos productos.json contiene 3 campos textuales que describen al producto: el nombre, la marca y la presentación. A partir de estos campos se deberán extraer palabras que describan a los productos. A continuación se proponen una serie de pautas para realizar esta extracción de características.<br>
+
+1. Generar una copia de las columnas nombre, presentación y marca para realizar este proceso.<br>
+```{r Copia de columnas textuales}
+tp2_prod = productos
+tp2_prod$nombre2 = tp2_prod$nombre
+tp2_prod$marca2 = tp2_prod$marca
+tp2_prod$presentacion2 = tp2_prod$presentacion
+```
+
+2. Convertir las tres columnas a minúsculas.
+```{r Todo minúscula}
+tp2_prod$nombre2 = tolower(as.character(tp2_prod$nombre2))
+tp2_prod$marca2 = tolower(as.character(tp2_prod$marca2))
+tp2_prod$presentacion2 = tolower(as.character(tp2_prod$presentacion2))
+```
+
+3. Quitar dígitos numéricos.<br>
+```{r Quitar números}
+tp2_prod$nombre2 = tm::removeNumbers(tp2_prod$nombre2)
+tp2_prod$marca2 = tm::removeNumbers(tp2_prod$marca2)
+tp2_prod$presentacion2 = tm::removeNumbers(tp2_prod$presentacion2)
+```
+
+4. Quitar símbolos de puntuación.<br>
+```{r Quitar símbolos de puntuación}
+tp2_prod$nombre2 = tm::removePunctuation(tp2_prod$nombre2)
+tp2_prod$marca2 = tm::removePunctuation(tp2_prod$marca2)
+tp2_prod$presentacion2 = tm::removePunctuation(tp2_prod$presentacion2)
+```
+
+5. Quitar tildes a las vocales.<br>
+```{r Quitar tilde a las vocales}
+tp2_prod$nombre2 = stringi::stri_trans_general(tp2_prod$nombre2, "Latin-ASCII")
+tp2_prod$marca2 = stringi::stri_trans_general(tp2_prod$marca2, "Latin-ASCII")
+tp2_prod$presentacion2 = stringi::stri_trans_general(tp2_prod$presentacion2, "Latin-ASCII")
+```
+
+6. Borrar espacios en campos marca y presentación.<br>
+```{r Borrar espacios en blanco}
+tp2_prod$marca2 = trimws(tp2_prod$marca2, which = "both")
+tp2_prod$presentacion2 = trimws(tp2_prod$presentacion2, which = "both")
+```
+
+7. Obtener el listado de unidades de presentación sin repetidos. Utilizar este listado para quitar unidades de presentación en el campo nombre.<br>
+```{r Unidades de presentación}
+unidades = unique(tp2_prod$presentacion2)
+tp2_prod$nombre2 = tm::removeWords(tp2_prod$nombre2, unidades)
+```
+
+8. Repetir el paso anterior, pero para marcas. De esta forma el campo nombre no contendrá marcas.<br>
+```{r marcas}
+marcas = unique(tp2_prod$marca2)
+tp2_prod$nombre2 = tm::removeWords(tp2_prod$nombre2, marcas)
+```
+
+```{r Borrar espacios en blanco del nombre}
+tp2_prod$nombre2 = trimws(tp2_prod$nombre2, which = "both")
+```
+
+9. Eliminar palabras vacías en español13 (preposiciones, artículos, etc).<br>
+```{r Eliminar palabras vacías}
+tp2_prod$nombre2 = tm::removeWords(tp2_prod$nombre2, tm::stopwords(kind = "spa"))
+
+# Borramos caracteres en blanco repetidos
+tp2_prod$nombre2 = tm::stripWhitespace(tp2_prod$nombre2)
+```
+
+10. Finalmente luego de aplicar todas estas transformaciones sobre el campo de nombres, separar en palabras y realizar conteos. Formar un vocabulario de palabras con aquellas palabras que tengan una mínima frecuencia en los textos de los productos.<br>
+```{r Palabras frecuentes}
+# Pasamos la columna a vector
+tp2_nombre_vec = as.vector(tp2_prod$nombre2)
+
+# Armamos el corpus
+tp2_corpus = Corpus(VectorSource(tp2_nombre_vec))
+
+# En formato matriz
+tp2_tdm = TermDocumentMatrix(tp2_corpus)
+
+# Vocabulario con Palabras frecuentes 
+tp2_voc = findFreqTerms(tp2_tdm, lowfreq = 20, highfreq = Inf)
+```
+
+11. Por cada palabra de vocabulario seleccionada, generar una columna de presencia ausencia. En el caso de ausencia marcar como NA, y en el caso de presencia algún caracter (Ej ‘S’). Es recomendable para luego aplicar reglas de asociación, utilizar un prefijo en cada una de de estas columnas seguido por la palabra en cuestión15 (Ej: termino_yerba, termino_leche).
+```{r Frecuencia de términos}
+# Tabla con la cantidad de veces que aparece cada palabra
+m = as.matrix(tp2_tdm)
+v = sort(rowSums(m),decreasing=TRUE)
+tp2_frec = data.frame(term = names(v),frec=v)
+
+tp2_frec
+```
+
+```{r Nube de etiquetas, warning=FALSE}
+# de library(wordcloud)
+par(bg="white")
+wordcloud(tp2_frec$term, tp2_frec$frec, col=ZissouC, random.order=FALSE, rot.per=0.3)
+```
+
+```{r Matriz de documentos}
+# copio el df
+tp2_tdm2 = tp2_tdm
+
+# Reemplazo los 0 por NA
+tp2_tdm2[tp2_tdm2 == 0] = NA
+
+# Reemplazo los 1 por "S"
+tp2_tdm2[tp2_tdm2 == 1] = "S"
+
+# Lo paso a matriz
+m2 = as.matrix(tp2_tdm2)
+
+# Lo hacemos dataframe
+tp2_tdm3 = data.frame(t(m2))
+
+# Nos quedamos con las columnas de nuestro vocabulario
+tp2_tdm3 = tp2_tdm3[, tp2_voc]
+
+# Le agregamos un prefijo al nombre
+colnames(tp2_tdm3) = paste("termino", colnames(tp2_tdm3), sep = "_")
+
+# Le agregamos el id del producto
+tp2_tdm3$producto = productos$id
+```
+
+```{r DF dicretizado + matriz binaria}
+tp2_final = tp2
+tp2_final = dplyr::inner_join(tp2_final, tp2_tdm3, by = "producto")
+```
+
+```{r Quitamos variables que dan reglas redundantes}
+# Quito id de producto, nombre, razon social del comercio, categoria, direccion
+tp2_final = tp2_final[,-c(1,2,3,5,10)]
+```
+
+
+
+<h3>Reglas de asociación</h3>
+
+Una vez que cuenta con el dataset preprocesado, avance sobre la obtención de reglas que le permitan concluir respecto de las siguientes consignas.
+```{r Pasamos a factor las que faltan}
+tp2_final$sucursal = as.factor(tp2_final$sucursal)
+tp2_final$barrio = as.factor(tp2_final$barrio)
+tp2_final$canasta = as.factor(tp2_final$canasta)
+
+str(tp2_final)
+```
+
+```{r Reglas de tp2_final, 1 itemset}
+# Reglas con un solo elemento, para ver los mas frecuentes
+tp2_reglas1 = apriori(tp2_final, parameter = list(support=0.01, confidence=0.25, target = "rules", minlen=1, maxlen=1))
+
+# Cantidad de inspección
+print(tp2_reglas1)
+arules::inspect(head(sort(tp2_reglas1, by="lift", decreasing = TRUE),20))
+
+# Lo exportamos a un html
+#r1 = inspectDT(tp2_reglas1)
+#htmlwidgets::saveWidget(r1, "reglas_itemset1.html", selfcontained = FALSE)
+```
+
+```{r Reglas de tp2_final sin razon social con bandera, 2 itemset}
+# Reglas con dos elementos, para ver asociaciones simples. Sin razón social, con bandera.
+tp2_reglas2 = apriori(tp2_final[-5], parameter = list(support=0.01, confidence=0.25, target = "rules", minlen=2, maxlen=2))
+
+# Cantidad e inspección
+print(tp2_reglas2)
+arules::inspect(head(sort(tp2_reglas2, by="lift", decreasing = TRUE),20))
+
+# Lo exportamos a un html
+r2 = inspectDT(tp2_reglas2)
+htmlwidgets::saveWidget(r2, "reglas_itemset2.html", selfcontained = FALSE)
+```
+
+```{r Reglas de tp2_final con razon social sin bandera, 2 itemset}
+# Reglas con dos elementos, para ver asociaciones simples. Sin razón social, con bandera.
+tp2_reglas2rs = apriori(tp2_final[-4], parameter = list(support=0.01, confidence=0.25, target = "rules", minlen=2, maxlen=2))
+
+# Cantidad e inspección
+print(tp2_reglas2rs)
+arules::inspect(head(sort(tp2_reglas2rs, by="lift", decreasing = TRUE),20))
+
+# Lo exportamos a un html
+r2rs = inspectDT(tp2_reglas2rs)
+htmlwidgets::saveWidget(r2rs, "reglas_itemset2_razon social.html", selfcontained = FALSE)
+```
+
+```{r Todas las reglas, sin razon social con bandera}
+# Reglas con al menos 3 elementos. Sin razón social, con bandera.
+tp2_reglas3 = apriori(tp2_final[-5], parameter = list(support=0.01, confidence=0.25, target = "rules", minlen=3))
+
+# Cantidad
+print(tp2_reglas3)
+
+# Eliminamos redundantes
+tp2_reglas3 = tp2_reglas3[!is.redundant(tp2_reglas3)]
+print(tp2_reglas3)
+```
+
+```{r Todas las reglas, con razon social sin bandera}
+# Reglas con al menos 3 elementos. Sin razón social, con bandera.
+tp2_reglas3rs = apriori(tp2_final[-4], parameter = list(support=0.01, confidence=0.25, target = "rules", minlen=3))
+
+# Cantidad
+print(tp2_reglas3rs)
+
+# Eliminamos redundantes
+tp2_reglas3rs = tp2_reglas3rs[!is.redundant(tp2_reglas3rs)]
+print(tp2_reglas3rs)
+```
+
+
+**Análisis descriptivo:** Escoja entre 10 y 20 reglas que le permitan describir el conjunto de datos.
+
+*El gráfico de frecuencias los hacemos con el dataset completo, pero filtramos las reglas sobre el dataset sin "razón social", ya que hay cosas interesantes con la bandera*
+```{r elementos mas frecuentes}
+tp2_frecuentes = arules::inspect(sort(tp2_reglas1, by="support", decreasing = TRUE))
+
+tp2_bar1 = ggplot(tp2_frecuentes, aes(x=reorder(rhs, -support), y=support, fill=support)) + geom_bar(stat = "identity") + geom_text(aes(label = scales::percent(support)),position = position_stack(vjust = 0.5), size = 3, colour = "black") + scale_fill_gradientn(colors=ZissouC, name="Soporte") +
+  ylab("") + 
+  xlab("")
+ 
+
+tp2_bar1 + labs(title = "Frecuencia de items",
+                subtitle = "se muestran los items con frecuencia mayor al 25%") +
+    theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 16),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=12),
+    axis.text.x = element_text(size =10, angle=90, hjust = 0.95, vjust = 0.2),
+    axis.text.y = element_text(size =12),
+    axis.title=element_text(size=12),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12)
+    )
+```
+
+*Los únicos que tienen una frecuencia mayor al 80% son "variacion2=mantiene" y "precio_m2=medio". Todos los subsets siguientes serán excluyendo estos items.*
+```{r lista negra}
+# Hacemos lista negra: aquellos items que se repiten en más del 80% de los datos
+bl = c("variacion2=mantiene", "precio_m2=medio")
+```
+
+*Nos interesa ver cómo los atributos de los productos y de las sucursales influyen en los precios.*
+```{r Vectores de listas blancas}
+# Atributos de productos
+lmarca = c(paste0("marca=", levels(tp2_final$marca)))
+lcanasta = c(paste0("canasta=", levels(tp2_final$canasta)))
+
+# Atributos de sucursal
+lsucursal = c(paste0("sucursal=", levels(tp2_final$sucursal)))
+ltipo = c(paste0("sucursalTipo=", levels(tp2_final$sucursalTipo)))
+lbandera = c(paste0("banderaDescripcion=", levels(tp2_final$banderaDescripcion)))
+lrs = c(paste0("comercioRazonSocial=", levels(tp2_final$comercioRazonSocial)))
+lbarrio = c(paste0("barrio=", levels(tp2_final$barrio)))
+lubicacion = c(paste0("ubicacion=", levels(tp2_final$ubicacion)))
+
+
+#Atributos de precios
+lvariacion1 = c(paste0("variacion1=", levels(tp2_final$variacion1)))
+lvariacion2 = c(paste0("variacion2=", levels(tp2_final$variacion2)))
+lvariacion3 = c(paste0("variacion3=", levels(tp2_final$variacion3)))
+lvariacion4 = c(paste0("variacion4=", levels(tp2_final$variacion4)))
+lvariacionT = c(paste0("variacionT=", levels(tp2_final$variacionT)))
+lprecio_rel1 = c(paste0("precio_rel1=", levels(tp2_final$precio_rel1)))
+lprecio_rel2 = c(paste0("precio_rel2=", levels(tp2_final$precio_rel2)))
+lprecio_rel3 = c(paste0("precio_rel3=", levels(tp2_final$precio_rel3)))
+lprecio_rel4 = c(paste0("precio_rel4=", levels(tp2_final$precio_rel4)))
+lprecio_rel_medio = c(paste0("precio_rel_medio=", levels(tp2_final$precio_rel_medio)))
+
+# Todos los atributos de producto en un solo vector. Hay que sacar el caso "canasta=NA" porque sino las reglas no corren
+lprod = c(paste0("marca=", levels(tp2_final$marca)),paste0("canasta=", levels(tp2_final$canasta)))
+lprod = lprod[-290]
+
+# Todos los atributos de sucursal
+lsuc_b = c(lsucursal, ltipo, lbandera, lubicacion)
+lsuc_rs = c(lsucursal, ltipo, lrs, lubicacion)
+
+# Todos los atributos de precios
+lprec = c(lvariacion1, lvariacion2, lvariacion3, lvariacion4, lvariacionT, lprecio_rel1, lprecio_rel2, lprecio_rel3, lprecio_rel4, lprecio_rel_medio)
+lprecT = c(lvariacionT, lprecio_rel_medio)
+lprecM = c(lvariacion1, lvariacion2, lvariacion3, lvariacion4, lprecio_rel1, lprecio_rel2, lprecio_rel3, lprecio_rel4)
+```
+
+
+1. Explique qué aportes se obtienen a partir de las mismas y explique cuál es el peso de cada una de acuerdo a las métricas asociadas.
+```{r Subset 1}
+tp2_reglas4 = subset(tp2_reglas3, (! lhs %in% bl) & (! lhs %in% lprec) & ((lhs %in% lprod) | (lhs %pin% "termino_") | (lhs %in% lsuc_b)) & (rhs %in% lprec) & (lift > 1.25 | lift < 0.75))
+
+print(tp2_reglas4)
+arules::inspect(head(sort(tp2_reglas4, by="lift", decreasing = TRUE),10))
+arules::inspect(tail(sort(tp2_reglas4, by="lift", decreasing = TRUE),10))
+
+# Lo exportamos a un html
+r3 = inspectDT(tp2_reglas4)
+htmlwidgets::saveWidget(r3, "reglas_sin precio en lhs.html", selfcontained = FALSE)
+```
+
+```{r Subset 2}
+tp2_reglas5 = subset(tp2_reglas3, (! lhs %in% bl) & (! lhs %in% lprecM) & ((lhs %in% lprod) | (lhs %pin% "termino_") | (lhs %in% lsuc_b)) & (rhs %in% lprecT) & (lift > 1.25 | lift < 0.75))
+
+print(tp2_reglas5)
+arules::inspect(head(sort(tp2_reglas5, by="lift", decreasing = TRUE),10))
+arules::inspect(tail(sort(tp2_reglas5, by="lift", decreasing = TRUE),10))
+
+# Lo exportamos a un html
+r4 = inspectDT(tp2_reglas5)
+htmlwidgets::saveWidget(r4, "reglas_solo var total y precio medio.html", selfcontained = FALSE)
+```
+
+2. Genere reglas de decisión que expliquen los factores más asociados a la desaceleración del aumento de precios en las últimas mediciones. Explique cuáles son las reglas más robustas, justifique y explique el conocimiento que estas aportan.
+
+*En este caso filtramos reglas sobre el subset con "razón social" y sin "bandera"*
+```{r Desaceleracion de precios}
+tp2_reglas6 = subset(tp2_reglas3rs, (! lhs %in% bl) & (! lhs %pin% "variacion") & (! lhs %pin% "precio_rel4") & (rhs %oin% c("variacion4=mantiene", "variacion4=disminucion leve", "variacion4=disminucion media", "variacion4=disminucion fuerte") & (lift > 1.25 | lift < 0.75)))
+
+print(tp2_reglas6)
+arules::inspect(head(sort(tp2_reglas6, by="lift", decreasing = TRUE),10))
+arules::inspect(tail(sort(tp2_reglas6, by="lift", decreasing = TRUE),10))
+
+# Lo exportamos a un html
+r5 = inspectDT(tp2_reglas6)
+htmlwidgets::saveWidget(r5, "reglas_desaceleracion.html", selfcontained = FALSE)
+```
+
+```{r Desaceleracion de precios gráfico}
+tp2_reglas6ss = tp2_reglas6[c(1,7,16,43,39,30)]
+
+plot(tp2_reglas6ss, method="graph", control=list(main="Ítems asociados a la desaceleración de precios en el cuarto periodo", itemLabels=T, measureLabels=F, alpha=1, nodeColors = "Gray", nodeCol=ZissouC, edgeCol="Gray", labelCol="#000000B3", precision	=2, arrowSize=0.25))
+
+arules::inspect(tp2_reglas6ss)
+```
+
+
+3. Escoja un lote de productos de su interés y explique qué factores asociados a su comportamiento obtiene a partir de reglas de asociación.
+```{r Canasta}
+tp2_reglas7 = subset(tp2_reglas3rs, (! lhs %in% bl) & (lhs %in% "canasta=recomendado") & (rhs %in% lprec) & (lift > 1.25 | lift < 0.75))
+
+print(tp2_reglas7)
+arules::inspect(head(sort(tp2_reglas7, by="lift", decreasing = TRUE),10))
+arules::inspect(tail(sort(tp2_reglas7, by="lift", decreasing = TRUE),10))
+
+# Lo exportamos a un html
+r6 = inspectDT(tp2_reglas7)
+htmlwidgets::saveWidget(r6, "reglas_recomendados.html", selfcontained = FALSE)
+```
+```{r Gráfico de reglas seleccionadas}
+tp2_reglas7ss = tp2_reglas7[c(79,14,47,120,128)]
+arules::inspect(tp2_reglas7ss)
+
+plot(tp2_reglas7ss, method="paracoord", control=list(col=ZissouC, main="Ítems asociados a la canasta de alimentos recomendados para el consumo"))
+```
+
+```{r Subset por ubicacion}
+tp2_reglas7b = subset(tp2_reglas3rs, (! lhs %in% bl) & (lhs %pin% "ubicacion=calle") & (! lhs %in% lprec) & (rhs %pin% "precio_rel_medio") & (lift > 1.25 | lift < 0.75))
+
+print(tp2_reglas7b)
+arules::inspect(sort(tp2_reglas7b, by="lift", decreasing = TRUE))
+```
+
+
+**Análisis predictivo a partir de las reglas**
+
+1. Seleccione 10 reglas sobre los precios de los primeros 3 períodos, y evalúelas utilizando métricas sobre los precios del último período.
+```{r Datasets}
+# Dejamos los primeros tres periodos
+tp2_1a3 = tp2_final[-c(4,10,11,15,16)]
+
+# Agregamos la columna "cadena"
+tp2_1a3 = mutate(tp2_1a3, cadena = ifelse(comercioRazonSocial %in% "Coto Centro Integral de Comercialización S.A.", "Coto",
+                                   ifelse(comercioRazonSocial %in%  "Deheza S.A.I.C.F. e I.", "Deheza-Shell",
+                                   ifelse(comercioRazonSocial %in%  "DIA Argentina S.A", "Dia",
+                                   ifelse(comercioRazonSocial %in%  "Estación Lima S.A.", "Lima-Shell",
+                                   ifelse(comercioRazonSocial %in%  "INC S.A.", "Carrefour",
+                                   ifelse(comercioRazonSocial %in%  "Josimar S.A.", "Josimar",
+                                   ifelse(comercioRazonSocial %in%  "Jumbo Retail Argentina S.A.", "Jumbo",
+                                   ifelse(comercioRazonSocial %in%  "Operadora de Estaciones de Servicios S.A.", "YPF",
+                                   ifelse(comercioRazonSocial %in%  "Pan American Energy LLC Argentina", "PAE-Axion",
+                                   ifelse(comercioRazonSocial %in% "Wal Mart Argentina S.R.L.", "Wal Mart", NA)))))))))))
+
+tp2_1a3$cadena = as.factor(tp2_1a3$cadena)
+tp2_1a3$comercioRazonSocial = NULL
+
+# Dejamos el cuarto periodos
+tp2_4 = tp2_final[-c(4,7,8,9,11,12,13,14,16)]
+
+# Agregamos la columna "cadena"
+tp2_4 = mutate(tp2_4, cadena = ifelse(comercioRazonSocial %in% "Coto Centro Integral de Comercialización S.A.", "Coto",
+                                   ifelse(comercioRazonSocial %in%  "Deheza S.A.I.C.F. e I.", "Deheza-Shell",
+                                   ifelse(comercioRazonSocial %in%  "DIA Argentina S.A", "Dia",
+                                   ifelse(comercioRazonSocial %in%  "Estación Lima S.A.", "Lima-Shell",
+                                   ifelse(comercioRazonSocial %in%  "INC S.A.", "Carrefour",
+                                   ifelse(comercioRazonSocial %in%  "Josimar S.A.", "Josimar",
+                                   ifelse(comercioRazonSocial %in%  "Jumbo Retail Argentina S.A.", "Jumbo",
+                                   ifelse(comercioRazonSocial %in%  "Operadora de Estaciones de Servicios S.A.", "YPF",
+                                   ifelse(comercioRazonSocial %in%  "Pan American Energy LLC Argentina", "PAE-Axion",
+                                   ifelse(comercioRazonSocial %in% "Wal Mart Argentina S.R.L.", "Wal Mart", NA)))))))))))
+
+tp2_4$cadena = as.factor(tp2_4$cadena)
+tp2_4$comercioRazonSocial = NULL
+
+# Los vectores para filtrar
+lprec1_3 = c(lvariacion1, lvariacion2, lvariacion3, lprecio_rel1, lprecio_rel2, lprecio_rel3)
+lprec4 = c(lvariacion4, lprecio_rel4)
+lcadena = c(paste0("cadena=", levels(tp2_4$cadena)))
+lsuc_cad = c(lsucursal, ltipo, lcadena, lubicacion)
+```
+
+
+```{r Reglas periodos 1,2,3}
+# Con los primeros tres periodos
+tp2_reglas8 = apriori(tp2_1a3, parameter = list(support=0.01, confidence=0.25, target = "rules", minlen=2))
+
+# Cantidad
+print(tp2_reglas8)
+
+# Eliminamos redundantes
+tp2_reglas8 = tp2_reglas8[!is.redundant(tp2_reglas8)]
+print(tp2_reglas8)
+```
+
+```{r Reglas periodo 4}
+# Con el cuarto periodo
+tp2_reglas9 = apriori(tp2_4, parameter = list(support=0.01, confidence=0.25, target = "rules", minlen=2))
+
+# Cantidad
+print(tp2_reglas9)
+
+# Eliminamos redundantes
+tp2_reglas9 = tp2_reglas9[!is.redundant(tp2_reglas9)]
+print(tp2_reglas9)
+```
+
+```{r Subsets 3 primeros periodos y periodo 4}
+# Primeros tres periodos
+tp2_reglas10 = subset(tp2_reglas8, (! lhs %in% bl) & (lhs %in% lprod) & (lhs %in% lsuc_cad) & (! lhs %in% lprec1_3) & (rhs %in% lprec1_3) & (lift > 1.25 | lift < 0.75))
+
+print(tp2_reglas10)
+arules::inspect(head(sort(tp2_reglas10, by="lift", decreasing = TRUE),10))
+arules::inspect(tail(sort(tp2_reglas10, by="lift", decreasing = TRUE),10))
+
+# Periodo 4
+tp2_reglas11 = subset(tp2_reglas9, (! lhs %in% "precio_m2=medio") & (lhs %in% lprod) & (lhs %in% lsuc_cad) & (! lhs %in% lprec4) & (rhs %in% lprec4) & (lift > 1.25 | lift < 0.75))
+
+print(tp2_reglas11)
+arules::inspect(head(sort(tp2_reglas11, by="lift", decreasing = TRUE),10))
+arules::inspect(tail(sort(tp2_reglas11, by="lift", decreasing = TRUE),10))
+
+# Union
+tp2_reglas_periodos = union(tp2_reglas10, tp2_reglas11)
+
+# Lo exporto
+r7 = inspectDT(tp2_reglas_periodos)
+htmlwidgets::saveWidget(r7, "reglas_periodos.html", selfcontained = FALSE)
+```
+
+```{r Selección}
+# Filtro las reglas que aparecen en todos los periodos
+tp2_reglas_periodos2 = tp2_reglas_periodos[c(11,13,14,90,7,91,15,12,18,94,17,29,23,26,99,33,100,32,92,20,16,21,59,54,56,108,30,24,27,93,28,22,25,98,65,64,111,44,45,102,105,41,38,101,40,37,34,112,74,70,103,42,39,35,79,82,116,72,114,76,73,68)]
+arules::inspect(tp2_reglas_periodos2)
+
+# Lo exporto
+r8 = inspectDT(tp2_reglas_periodos2)
+htmlwidgets::saveWidget(r8, "reglas_periodos filtrado.html", selfcontained = FALSE)
+
+# Elijo las 10 reglas de interñes
+tp2_reglas_periodos3 = sort(tp2_reglas_periodos2[c(1:22,27:34,44:47,51:54,35:37)],decreasing=TRUE)
+arules::inspect(tp2_reglas_periodos3)
+```
+
+```{r Gráfico}
+plot(tp2_reglas_periodos3, method="matrix", control= list(col=ZissouC, main = "Ítems asociados al precio relativo en los periodos de estudio"))
+plot(tp2_reglas_periodos3, method="grouped", control= list(col=ZissouC, main = "Ítems asociados al precio relativo en los periodos de estudio", rhs_max=20, spacing=2,legend="", reverse=T))
+```
+
+2. En el caso que corresponda: ¿Puede validar los resultados obtenidos en el TP1 a partir de reglas? En el caso afirmativo incorpore algunos ejemplos.
+```{r Inflación, echo=TRUE}
+# Agregamos columnas de inflación
+tp2_infl = tp2_reshape
+
+tp2_infl = mutate(tp2_infl, inflacion1 = 
+                      ifelse(variacion1 < 0.034, "debajo de inflación", "encima de inflación"))
+
+tp2_infl = mutate(tp2_infl, inflacion2 = 
+                      ifelse(variacion2 < 0.017, "debajo de inflación", "encima de inflación"))
+
+tp2_infl = mutate(tp2_infl, inflacion3 = 
+                      ifelse(variacion3 < 0.034, "debajo de inflación", "encima de inflación"))
+
+tp2_infl = mutate(tp2_infl, inflacion4 = 
+                      ifelse(variacion4 < 0.057, "debajo de inflación", "encima de inflación"))
+
+tp2_infl = mutate(tp2_infl, inflacionT = 
+                      ifelse(variacionT < 0.149, "debajo de inflación", "encima de inflación"))
+
+# Sacamos las de variacion ya que son redundantes con esto
+tp2_infl$variacion1 = NULL
+tp2_infl$variacion2 = NULL
+tp2_infl$variacion3 = NULL
+tp2_infl$variacion4 = NULL
+tp2_infl$variacionT = NULL
+
+# Agregamos la columna "canasta"
+tp2_infl = mutate(tp2_infl, canasta = ifelse(Categoria %in% target_rec, "recomendado",
+                                            ifelse(Categoria %in% target_mod, "moderado",
+                                            ifelse(Categoria %in% target_evi, "evitar", NA))))
+
+# Agregamos la columna "ubicacion"
+tp2_infl = dplyr::mutate(tp2_infl, ubicacion = ifelse(grepl('Av.',direccion), 'avenida', "calle"))
+tp2_infl$ubicacion = as.factor(tp2_infl$ubicacion)
+
+# Discretizamos
+tp2_infl$precio_rel1 = discretize(tp2_infl$precio_rel1, method = "fixed", breaks = intervalos1, labels = etiquetas1)
+tp2_infl$precio_rel2 = discretize(tp2_infl$precio_rel2, method = "fixed", breaks = intervalos1, labels = etiquetas1)
+tp2_infl$precio_rel3 = discretize(tp2_infl$precio_rel3, method = "fixed", breaks = intervalos1, labels = etiquetas1)
+tp2_infl$precio_rel4 = discretize(tp2_infl$precio_rel4, method = "fixed", breaks = intervalos1, labels = etiquetas1)
+tp2_infl$precio_rel_medio = discretize(tp2_infl$precio_rel_medio, method = "fixed", breaks = intervalos1, labels = etiquetas1)
+tp2_infl$precio_m2 = discretize(tp2_infl$precio_m2, method = "fixed", breaks = intervalos2, labels = etiquetas2)
+
+# Agregamos los términos
+tp2_infl = dplyr::inner_join(tp2_infl, tp2_tdm3, by = "producto")
+```
+
+```{r Solo variables discretas1}
+# Quito id de producto, nombre, categoria, presentacion, bandera, direccion y las variables continuas
+tp2_infl = select(tp2_infl,-c(1:3,5,8,10,12:31))
+tp2_infl$producto = NULL
+```
+
+```{r Reglas con el set de inflacion}
+# Reglas de un item para ver frecuentes
+tp2_reglas13 = apriori(tp2_infl, parameter = list(support=0.01, confidence=0.25, target = "rules", minlen=1, maxlen=1))
+print(tp2_reglas13)
+arules::inspect(sort(tp2_reglas13, by="lift", decreasing = TRUE))
+
+# Reglas de 2 o mas items
+tp2_reglas12 = apriori(tp2_infl, parameter = list(support=0.01, confidence=0.25, target = "rules", minlen=2))
+print(tp2_reglas12)
+
+# Eliminamos redundantes
+tp2_reglas12 = tp2_reglas12[!is.redundant(tp2_reglas12)]
+print(tp2_reglas12)
+```
+
+```{r Subsets terminos para verificar inflacion}
+tp2_reglas14 = subset(tp2_reglas12, (! lhs %in% "precio_m2=medio") & (! lhs %pin% "inflacion") & (lhs %in% "termino_agua=S")& (rhs %pin% "inflacion") & (lift > 1.25 | lift < 0.75))
+print(tp2_reglas14)
+arules::inspect(head((sort(tp2_reglas14, by="lift", decreasing = TRUE)),10))
+
+tp2_reglas14b = subset(tp2_reglas12, (! lhs %in% "precio_m2=medio") & (! lhs %pin% "inflacion") & (lhs %in% "termino_leche=S")& (rhs %pin% "inflacion") & (lift > 1.25 | lift < 0.75))
+print(tp2_reglas14b)
+arules::inspect(head((sort(tp2_reglas14b, by="lift", decreasing = TRUE)),13))
+```
+```{r Para graficar}
+tp2_reglas14ss = tp2_reglas14[1:2]
+tp2_reglas14bss = tp2_reglas14b[c(1,2,8,9,13)]
+
+tp2_agua_leche = union(tp2_reglas14ss, tp2_reglas14bss)
+
+arules::inspect(tp2_agua_leche)
+plot(tp2_agua_leche, method="paracoord", control=list(col=ZissouC, main="Ítems asociados a los términos 'Agua' y 'Leche'"))
+```
+
+
+
+```{r Subsets canastas para verificar aumento y precio}
+# Filtro sobre las reglas con todo el dataset (con razon social, sin bandera)
+# Para verficiar si canasta moderado tuvo menor aumento
+# Para verificar si canasta moderado es la de mayor precio
+# Para verificas si canasta evitar es la de mayor precio
+tp2_reglas15 = subset(tp2_reglas3rs, (! lhs %in% bl) & (! lhs %in% lprec) & (lhs %pin% "canasta") & (rhs %in% lprec) & (lift > 1.25 | lift < 0.75))
+print(tp2_reglas15)
+
+# Lo exporto
+r9 = inspectDT(tp2_reglas15)
+htmlwidgets::saveWidget(r9, "reglas_canastas.html", selfcontained = FALSE)
+
+tp2_reglas15ss = tp2_reglas15[c(85:87,130:132,165,164,69:71,96:98,173,61,175)]
+arules::inspect(tp2_reglas15ss)
+plot(tp2_reglas15ss, method="matrix", control=list(col=ZissouC, main="Ítems asociados al comportamiento de los grupos de alimentos"))
+```
+
+
+
+
+
+```{r Grafico de terminos frecuentes set inflacion}
+tp2_frecuentes_infl = tp2_reglas13[c(8,11,15,17,18,20,21)]
+tp2_frecuentes_infldf = arules::inspect(tp2_frecuentes_infl)
+
+tp2_bar2 = ggplot(tp2_frecuentes_infldf, aes(x=reorder(rhs, -rhs), y=support, fill=support)) + geom_bar(stat = "identity") + geom_text(aes(label = scales::percent(support)),position = position_stack(vjust = 0.5), size = 3, colour = "black") + scale_fill_gradientn(colors=ZissouC, name = "Soporte") +
+  ylab("") + 
+  xlab("")
+ 
+
+tp2_bar2 + labs(title = "Frecuencia de items relacionados a la inflación",
+                subtitle = "se muestran los items con frecuencia mayor al 25%") +
+    theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 16),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=12),
+    axis.text.x = element_text(size =10, angle=90, hjust = 0.95, vjust = 0.2),
+    axis.text.y = element_text(size =12),
+    axis.title=element_text(size=12),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12)
+    )
+```
+
+
+
+
+
+```{r Gráfico de precio relativo medio por sucursal}
+# precio relativo medio por sucursal
+tp2_precio_suc = 
+ na.omit(tp2_reshape %>%
+ group_by(sucursal, comercioRazonSocial) %>%
+ filter(comercioRazonSocial == "INC S.A." | comercioRazonSocial == "Coto Centro Integral de Comercialización S.A." | comercioRazonSocial == "Jumbo Retail Argentina S.A." | comercioRazonSocial == "DIA Argentina S.A") %>% 
+ dplyr::summarise(media_precio = mean(precio_rel_medio)) %>%
+ dplyr::arrange(sucursal))
+
+# Le agregamos la información geográfica
+tp2_precio_suc = inner_join(tp2_precio_suc, sucursales[2:15], by = c("sucursal" = "id"))
+
+tp2_precio_suc
+```
+
+```{r Gráfico de precio relativo medio por bandera}
+# precio relativo medio por bandera
+tp2_precio_band = 
+ na.omit(tp2_reshape %>%
+ group_by(sucursal, banderaDescripcion) %>%
+ filter(banderaDescripcion == "COTO CICSA" | banderaDescripcion == "Disco" | banderaDescripcion == "Supermercados DIA" | banderaDescripcion ==  "Market"| banderaDescripcion == "Express" | banderaDescripcion ==  "Hipermercado Carrefour"| banderaDescripcion == "Vea" | banderaDescripcion == "Jumbo") %>% 
+ dplyr::summarise(media_precio = mean(precio_rel_medio)) %>%
+ dplyr::arrange(sucursal))
+
+# Le agregamos la información geográfica
+tp2_precio_band = inner_join(tp2_precio_band, sucursales[2:15], by = c("sucursal" = "id"))
+
+tp2_precio_band
+```
+
+
+```{r REC: Gráfico de precio relativo medio por sucursal}
+Budapest1D = wes_palette("GrandBudapest1", n = 4)
+
+
+fig.tp2_precio_suc = 
+map.caba1 + 
+geom_point(data=tp2_precio_suc, aes(x=lng, y=lat, color=as.factor(comercioRazonSocial.x), size=media_precio), inherit.aes = FALSE, shape=19, alpha = 0.6) +
+scale_size_continuous(range = c(3, 7), name = "Precio relativo medio") + scale_colour_manual(values = Budapest1D, name="Razón Social") + guides(colour = guide_legend(override.aes = list(size=7)))
+
+
+
+fig.tp2_precio_suc + labs(title = "",
+                        subtitle = "",
+                        caption = "") +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =12),
+    axis.text.y = element_text(size =12),
+    axis.title=element_text(size=12),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12) 
+  )
+```
+
+```{r REC: Gráfico de precio relativo medio por bandera}
+fig.tp2_precio_band = 
+map.caba1 + 
+geom_point(data=tp2_precio_band, aes(x=lng, y=lat, color=as.factor(banderaDescripcion.x), size=media_precio), inherit.aes = FALSE, shape=19, alpha = 0.6) +
+scale_size_continuous(range = c(3, 7), name = "Precio relativo medio") + guides(colour = guide_legend(override.aes = list(size=7))) #+ scale_colour_manual(values = "Dark1", name="Bandera")
+
+
+
+fig.tp2_precio_band + labs(title = "",
+                        subtitle = "",
+                        caption = "") +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =12),
+    axis.text.y = element_text(size =12),
+    axis.title=element_text(size=12),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12) 
+  )
+```

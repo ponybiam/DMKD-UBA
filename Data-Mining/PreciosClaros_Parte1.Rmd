@@ -1,0 +1,841 @@
+---
+title: "TP01_Biam_1"
+output: html_document
+---
+
+```{r Librerías, include=FALSE}
+library(jsonlite)
+library(geojsonio)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(wesanderson)
+library(viridisLite)
+library(rgdal)
+library(ggplot2)
+library(rgeos)
+```
+
+```{r Paletas de colores}
+ZissouD = wes_palette("Zissou1",5, type = "discrete")
+ZissouC = wes_palette("Zissou1",50, type = "continuous")
+DarjD = wes_palette("Darjeeling1", 5, type = "discrete")
+```
+
+```{r Importación de archivos json, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+sucursales = stream_in(file("sucursales.json",open="r"))
+productos = stream_in(file("productos.json",open="r"))
+precios = stream_in(file("precios.json",open="r"))
+```
+
+```{r Importación de archivos csv, eval=FALSE, include=FALSE}
+# Importamos los datos de las mediciones y de los barrios
+mediciones = read.csv("./Datasets adicionales/mediciones.csv")
+sucursales = read.csv("./Datasets adicionales/sucursales_barrios.csv")
+productos = read.csv("./Datasets adicionales/productos_categoria.csv")
+inflacion = read.csv("./Datasets adicionales/inflacion.csv")
+precio_metros2 = read.csv("./barrios/precio_metro.csv")
+```
+
+```{r Unión de todas las tablas, eval=FALSE, include=FALSE}
+# Agregamos la info de los productos al df "precios"
+data1 = inner_join(precios, productos, by = c("producto" = "id"))
+
+#Agregamos la info de sucursales a "data1"
+data2 = inner_join(data1, sucursales, by = c("sucursal" = "id"))
+
+# Borramos "data1", nos quedamos con "data2"
+rm(data1)
+
+# Armo un dataset con la info que me interesa. Se identificará cada consulta con el id del df "precios"
+data = select(data2, `_id`, "producto", "nombre", "Categoria", "marca", "presentacion", "precio", "medicion", "sucursal", "sucursalTipo", "banderaDescripcion", "comercioRazonSocial", "barrio")
+```
+
+```{r Separación den grupos de alimentos, eval=FALSE, include=FALSE}
+# Armamos canasta de alimentos
+target_rec = c("Agua","Infusiones","Leche", "Leche en polvo", "Arroz","Harinas","Verduras congeladas")
+target_mod = c("Conservas","Quesos","Pastas","Yogur","Aceite", "Aceite de oliva", "Manteca","Endulzantes")
+target_evi = c("Bebidas sin alcohol", "Bebidas deportivas", "Jugos en polvo", "Carnes congeladas", "Otros congelados", "Cereales azucarados", "Panificados","Salsas")
+
+recomendados = filter(data, Categoria %in% target_rec)
+moderados = filter(data, Categoria %in% target_mod) 
+evitar = filter(data, Categoria %in% target_evi) 
+```
+
+```{r Mapa de CABA para el geoplot desde geojson, eval=FALSE, include=FALSE}
+caba = geojson_read("./barrios/barrios.geojson", what = "sp")
+caba@data$id = rownames(caba@data)
+caba.points = ggplot2::fortify(caba, region="id")
+caba.df = plyr::join(caba.points, caba@data, by="id")
+```
+
+```{r Mapa de CABA con precios por metro cuadrado, eval=FALSE, include=FALSE}
+# Cambiamos de factor a character
+caba.df %>% mutate_if(is.factor, as.character) -> caba.df
+
+#Reemplazamos Nuñez mal escrito por NUNEZ
+caba.df$BARRIO[caba.df$BARRIO=="NUÃ‘EZ"] = "NUNEZ"
+
+# Le agregamos el precio por metro cuadrado de cada barrio
+caba.df = plyr::join(caba.df, precio_metros2, by="BARRIO")
+```
+
+```{r Centro de cada polígono}
+# Dataframe con los centros de cada polígono (barrio)
+caba.centros = as.data.frame(SpatialPointsDataFrame(gCentroid(caba, byid=TRUE), caba@data, match.ID=FALSE))
+
+centros = ggplot(caba.centros, aes(x=y, y=x, label=BARRIO))+
+  geom_point(size=0, color="white") +
+  geom_text(aes(label=BARRIO),hjust=0, vjust=0, size = 2, color = "grey")
+```
+
+```{r Heatmap CABA precio m2}
+# El mapa de CABA coloreado según precio del metro cuadrado
+map.caba = ggplot(caba.df) + 
+  aes(long,lat,group=group,fill=PRECIO) + 
+  geom_polygon() +
+  geom_path(color="white") +
+  coord_equal() +
+  xlab("Longitud") +
+  ylab("Latitud") +
+  scale_fill_gradient(low = "azure", high = "dimgrey", name = "Precio m2 (USD)")
+  #scale_fill_gradientn(colours = ZissouC)
+  #scale_fill_viridis_c(option="magma")
+
+# El mapa de arriba pero con los nombres de los barrios
+map.caba1 = map.caba + geom_text(data=caba.centros, aes(x,y,label=BARRIO), inherit.aes = FALSE, hjust=0, vjust=0, size = 2, color = "black")
+
+map.caba1
+```
+
+
+1. Análisis por grupo de alimentos: Consumo Recomendado, Consumo Moderado y Evitar Consumo.
+
+```{r Lista de mediciones}
+mediciones
+```
+
+1.1. RECOMENDADOS
+
+1.1.a. Box plot por categoría de alimento del grupo.
+```{r REC: boxplot de precios por categoria}
+bp1 = ggplot(data=recomendados, aes(x=Categoria, y=precio, fill=Categoria)) +
+      geom_boxplot() +
+      scale_fill_brewer(palette="Reds") +
+      ylab("Precio ($AR)") + 
+      xlab("") 
+
+bp1 + labs(title = "Precio de Alimentos Recomendados",
+        subtitle = "Precio de cada categoría de producto",
+        caption = "") +
+   theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+1.1.b. Gráfico de barras de la proporción de aumento por mes, comparado con inflación.
+```{r REC: Proporción de aumento}
+# Aumento medio en todo el periodo, por categoría.
+rec_aumento_cat = 
+  (na.omit(recomendados %>%
+ group_by(Categoria, nombre, medicion) %>%
+ dplyr::summarise(media = mean(precio)) %>%
+ subset(medicion == 1 | medicion == 10)%>%
+ dplyr::mutate(aumento_total = (media - lag(media))/lag(media))%>%
+ dplyr::arrange(Categoria)) %>%
+
+ group_by(Categoria) %>%
+ dplyr::summarise(media_aumento_total = mean(aumento_total)) %>%
+ dplyr::arrange(Categoria)
+)
+
+# Aumento medio, por medicion.
+rec_aumento_med = 
+ (na.omit(recomendados %>%
+ dplyr::group_by(Categoria, nombre, medicion) %>%
+ dplyr::summarise(media = mean(precio)) %>%
+ subset(medicion == 1 | medicion == 4 | medicion == 6 | medicion == 8 | medicion == 10)%>%
+ dplyr::mutate(aumento_mensual = (media - lag(media))/lag(media))%>%
+ dplyr::arrange(Categoria)) %>%
+   
+ group_by(medicion, Categoria) %>%
+ dplyr::summarise(media_aumento = mean(aumento_mensual)) %>%
+ dplyr::arrange(Categoria)
+)
+
+# Le agregamos la información de inflación
+rec_aumento_med = inner_join(rec_aumento_med, inflacion, by = "medicion")
+
+rec_aumento_cat
+rec_aumento_med
+```
+
+```{r REC: Gráfico de aumento acumulado por categoría de producto}
+fig1 = ggplot(data=rec_aumento_med, aes(x=Categoria, y=media_aumento, group=periodo, fill=periodo)) + 
+  geom_bar(stat="identity") + 
+  scale_fill_manual(name="Mes", values = ZissouD) +
+  geom_text(aes(label = scales::percent(media_aumento)),position = position_stack(vjust = 0.5), size = 7, colour = "white") + 
+  ylab("") + 
+  xlab("") + 
+  geom_line(aes(x=Categoria,y=alimentos_periodo, color=as.factor(alimentos_periodo)),size=0.5) +
+  scale_color_manual(values = "black", name = "Inflación")
+
+fig1 + labs(title = "Aumento por mes de Alimentos Recomendados",
+        subtitle = "Aumento de cada categoría de producto")+
+    theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+1.1.c. Gráfico sobre el mapa de CABA de sucursales y barrios con mayor y menor aumento (por categoría) y mayor y menor precio medio (por categoría)
+```{r REC: aumento de cada categoria, por sucursal}
+# Aumento por sucursal, de cada categoría
+rec_aumento_sucursal = na.omit(recomendados %>%
+ group_by(sucursal, Categoria, nombre, medicion) %>%
+ dplyr::summarise(media = mean(precio)) %>%
+ subset(medicion == 1 | medicion == 10)%>%
+ dplyr::mutate(aumento_total = (media - lag(media))/lag(media))%>%
+ dplyr::arrange(sucursal)) %>%
+
+ group_by(Categoria, sucursal) %>%
+ dplyr::summarise(media_aumento_total = mean(aumento_total)) %>%
+ dplyr::arrange(sucursal)
+
+# Sucursal de máximo aumento, de cada categoría
+rec_aumento_sucursal_max = 
+  rec_aumento_sucursal %>% 
+  group_by(Categoria, sucursal) %>% 
+  dplyr::summarise(media_aumento_total = max(media_aumento_total)) %>%
+  dplyr::arrange(Categoria, desc(media_aumento_total)) %>%
+  slice(which.max(media_aumento_total))
+
+# Le agregamos la información geográfica
+rec_aumento_sucursal_max = inner_join(rec_aumento_sucursal_max, sucursales[2:15], by = c("sucursal" = "id"))
+
+# Sucursal de min aumento, de cada categoría
+rec_aumento_sucursal_min = 
+  rec_aumento_sucursal %>% 
+  group_by(Categoria, sucursal) %>% 
+  dplyr::summarise(media_aumento_total = min(media_aumento_total)) %>%
+  dplyr::arrange(Categoria, media_aumento_total) %>%
+  slice(which.min(media_aumento_total))
+
+# Le agregamos la información geográfica
+rec_aumento_sucursal_min = inner_join(rec_aumento_sucursal_min, sucursales[2:15], by = c("sucursal" = "id"))
+
+rec_aumento_sucursal
+rec_aumento_sucursal_max
+rec_aumento_sucursal_min
+```
+
+```{r REC: Gráfico de aumento de categoría, por sucursal}
+fig.rec.sucursal = 
+map.caba1 + 
+geom_jitter(data=rec_aumento_sucursal_max, aes(x=lng, y=lat, color=as.factor(Categoria)), inherit.aes = FALSE, shape=18, size=7,alpha = 0.6) +
+#geom_label(aes(x=lng, y=lat, label=Categoria, color=factor(Categoria)), data=rec_aumento_sucursal_max, stat = "identity", position="Identity", parse = FALSE, label.padding = unit(0.25, "lines"), label.r = unit(0, "lines"), label.size = 0.05, inherit.aes = FALSE)+
+geom_jitter(data=rec_aumento_sucursal_min, aes(x=lng, y=lat, color=as.factor(Categoria)), inherit.aes = FALSE, shape=20, size=6) + 
+scale_color_brewer(palette="Dark2", name="Categoría de producto")
+
+
+
+fig.rec.sucursal + labs(title = "Aumento por sucursal del grupo de Alimentos Recomendados",
+                        subtitle = "se muestran las sucursales con mayor (◆) y menor (●) aumento",
+                        caption = "") +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+```{r REC: precio medio de cada categoria, por sucursal}
+# precio por sucursal, de cada categoría
+rec_precio_sucursal = na.omit(recomendados %>%
+ group_by(sucursal, Categoria, nombre) %>%
+ dplyr::summarise(media_precio = mean(precio)) %>%
+ dplyr::arrange(sucursal))
+
+# Sucursal de máximo precio medio, de cada categoría
+rec_precio_sucursal_max = 
+  rec_precio_sucursal %>% 
+  group_by(Categoria, sucursal) %>% 
+  dplyr::summarise(media_precio = mean(media_precio)) %>%
+  dplyr::arrange(Categoria, desc(media_precio)) %>%
+  slice(which.max(media_precio))
+
+# Le agregamos la información geográfica
+rec_precio_sucursal_max = inner_join(rec_precio_sucursal_max, sucursales[2:15], by = c("sucursal" = "id"))
+
+# Sucursal de mínimo precio medio, de cada categoría
+rec_precio_sucursal_min = 
+  rec_precio_sucursal %>% 
+  group_by(Categoria, sucursal) %>% 
+  dplyr::summarise(media_precio = mean(media_precio)) %>%
+  dplyr::arrange(Categoria, desc(media_precio)) %>%
+  slice(which.min(media_precio))
+
+# Le agregamos la información geográfica
+rec_precio_sucursal_min = inner_join(rec_precio_sucursal_min, sucursales[2:15], by = c("sucursal" = "id"))
+
+rec_precio_sucursal
+rec_precio_sucursal_max
+rec_precio_sucursal_min
+
+```
+
+```{r REC: Gráfico de aumento de categoría, por sucursal}
+fig.rec.sucursal.precio = 
+map.caba1 + 
+geom_jitter(data=rec_precio_sucursal_max, aes(x=lng, y=lat, color=as.factor(Categoria)), inherit.aes = FALSE, shape=18, size=7,alpha = 0.6) +
+geom_jitter(data=rec_precio_sucursal_min, aes(x=lng, y=lat, color=as.factor(Categoria)), inherit.aes = FALSE, shape=20, size=6) + 
+scale_color_brewer(palette="Dark2", name="Categoría de producto")
+
+
+
+fig.rec.sucursal.precio + labs(title = "Precio medio por sucursal del grupo de Alimentos Recomendados",
+                        subtitle = "se muestran las sucursales con mayor (◆) y menor (●) precio medio",
+                        caption = "") +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+```{r REC: Aumento de cada categoria, por barrio}
+# Aumento por barrio, de cada categoria
+rec_aumento_barrio = na.omit(recomendados %>%
+ group_by(barrio, Categoria, nombre, medicion) %>%
+ dplyr::summarise(media = mean(precio)) %>%
+ subset(medicion == 1 | medicion == 10)%>%
+ dplyr::mutate(aumento_total = (media - lag(media))/lag(media))%>%
+ dplyr::arrange(barrio)) %>%
+
+ group_by(Categoria, barrio) %>%
+ dplyr::summarise(media_aumento_total = mean(aumento_total)) %>%
+ dplyr::arrange(barrio)
+
+
+# Barrio de máximo aumento, de cada categoría
+rec_aumento_barrio_max = 
+  rec_aumento_barrio %>% 
+  group_by(Categoria, barrio) %>% 
+  dplyr::summarise(media_aumento_total = max(media_aumento_total)) %>%
+  dplyr::arrange(Categoria, desc(media_aumento_total)) %>%
+  slice(which.max(media_aumento_total))
+
+rec_aumento_barrio_max = inner_join(rec_aumento_barrio_max, caba.centros, by = c("barrio" = "BARRIO"))
+
+
+# Barrio de min aumento, de cada categoría
+rec_aumento_barrio_min = 
+  rec_aumento_barrio %>% 
+  group_by(Categoria, barrio) %>% 
+  dplyr::summarise(media_aumento_total = min(media_aumento_total)) %>%
+  dplyr::arrange(Categoria, media_aumento_total) %>%
+  slice(which.min(media_aumento_total))
+
+rec_aumento_barrio_min = inner_join(rec_aumento_barrio_min, caba.centros, by = c("barrio" = "BARRIO"))
+
+
+rec_aumento_barrio
+rec_aumento_barrio_max
+rec_aumento_barrio_min
+```
+
+```{r REC: Aumento de cada categoría por barrio}
+fig.rec.barrio = map.caba1 + geom_jitter(data=rec_aumento_barrio_max, aes(x, y, color=as.factor(Categoria)), inherit.aes = FALSE, shape=18, size=7, alpha=0.6) +
+            geom_jitter(data=rec_aumento_barrio_min, aes(x, y, color=as.factor(Categoria)), inherit.aes = FALSE, shape=20, size=6) + 
+            scale_color_brewer(palette="Dark2", name="Categoría de producto")
+
+fig.rec.barrio + labs(title = "Aumento por barrio del grupo de Alimentos Recomendados",
+        subtitle = "se muestran los barrios con mayor (◆) y menor (●) aumento",
+        caption = "") +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+```{r REC: precio medio de cada categoria, por barrio}
+# precio por barrio, de cada categoría
+rec_precio_barrio = na.omit(recomendados %>%
+ group_by(barrio, Categoria, nombre) %>%
+ dplyr::summarise(media_precio = mean(precio)) %>%
+ dplyr::arrange(barrio))
+
+# Barrio de máximo precio medio, de cada categoría
+rec_precio_barrio_max = 
+  rec_precio_barrio %>% 
+  group_by(Categoria, barrio) %>% 
+  dplyr::summarise(media_precio = mean(media_precio)) %>%
+  dplyr::arrange(Categoria, desc(media_precio)) %>%
+  slice(which.max(media_precio))
+
+# Le agregamos la información geográfica
+rec_precio_barrio_max = inner_join(rec_precio_barrio_max, caba.centros, by = c("barrio" = "BARRIO"))
+
+# Barrio de mínimo precio medio, de cada categoría
+rec_precio_barrio_min = 
+  rec_precio_barrio %>% 
+  group_by(Categoria, barrio) %>% 
+  dplyr::summarise(media_precio = mean(media_precio)) %>%
+  dplyr::arrange(Categoria, desc(media_precio)) %>%
+  slice(which.min(media_precio))
+
+# Le agregamos la información geográfica
+rec_precio_barrio_min = inner_join(rec_precio_barrio_min, caba.centros, by = c("barrio" = "BARRIO"))
+
+rec_precio_barrio
+rec_precio_barrio_max
+rec_precio_barrio_min
+```
+
+```{r REC: Gráfico de precio medio de categoría, por barrio}
+fig.rec.barrio.precio = map.caba1 + geom_jitter(data=rec_precio_barrio_max, aes(x, y, color=as.factor(Categoria)), inherit.aes = FALSE, shape=18, size=7, alpha=0.6) +
+            geom_jitter(data=rec_precio_barrio_min, aes(x, y, color=as.factor(Categoria)), inherit.aes = FALSE, shape=20, size=6) + 
+            scale_color_brewer(palette="Dark2", name="Categoría de producto")
+
+fig.rec.barrio.precio + labs(title = "Precio medio por barrio del grupo de Alimentos Recomendados",
+        subtitle = "se muestran los barrios con mayor (◆) y menor (●) precio medio",
+        caption = "") +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+
+1.2. MODERADOS
+
+1.2.a. Box plot por categoría de alimento del grupo.
+```{r MOD: boxplot de precios por categoria}
+bp2 = ggplot(data=moderados, aes(x=Categoria, y=precio, fill=Categoria)) +
+      geom_boxplot() +
+      scale_fill_brewer(palette="Greens") +
+      ylab("Precio ($AR)") + 
+      xlab("")
+
+bp2 + labs(title = "Precio de Alimentos Moderados",
+        subtitle = "Precio de cada categoría de producto",
+        caption = "") +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+1.2.b. Gráfico de barras de la proporción de aumento por mes, comparado con inflación.
+```{r MOD: Proporción de aumento}
+# Aumento medio en todo el periodo, por categoría.
+mod_aumento_cat = 
+  (na.omit(moderados %>%
+ group_by(Categoria, nombre, medicion) %>%
+ dplyr::summarise(media = mean(precio)) %>%
+ subset(medicion == 1 | medicion == 10)%>%
+ dplyr::mutate(aumento_total = (media - lag(media))/lag(media))%>%
+ dplyr::arrange(Categoria)) %>%
+
+ group_by(Categoria) %>%
+ dplyr::summarise(media_aumento_total = mean(aumento_total)) %>%
+ dplyr::arrange(Categoria)
+)
+
+# Aumento medio, por medicion.
+mod_aumento_med = 
+ (na.omit(moderados %>%
+ group_by(Categoria, nombre, medicion) %>%
+ dplyr::summarise(media = mean(precio)) %>%
+ subset(medicion == 1 | medicion == 4 | medicion == 6 | medicion == 8 | medicion == 10)%>%
+ dplyr::mutate(aumento_mensual = (media - lag(media))/lag(media))%>%
+ dplyr::arrange(Categoria)) %>%
+   
+ group_by(medicion, Categoria) %>%
+ dplyr::summarise(media_aumento = mean(aumento_mensual)) %>%
+ dplyr::arrange(Categoria)
+)
+
+# Le agregamos la información de inflación
+mod_aumento_med = inner_join(mod_aumento_med, inflacion, by = "medicion")
+
+mod_aumento_cat
+mod_aumento_med
+```
+
+```{r MOD: Gráfico de aumento acumulado por categoría de producto}
+fig2 = ggplot(data=mod_aumento_med, aes(x=Categoria, y=media_aumento, group=periodo, fill=periodo)) + 
+  geom_bar(stat="identity") + 
+  scale_fill_manual(name="Mes", values = ZissouD) +
+  geom_text(aes(label = scales::percent(media_aumento)),position = position_stack(vjust = 0.5), size = 7, colour = "white") + 
+  ylab("") + 
+  xlab("") + 
+  geom_line(aes(x=Categoria,y=alimentos_periodo, color=as.factor(alimentos_periodo)),size=0.5) +
+  scale_color_manual(values = "black", name = "Inflación")
+
+fig2 + labs(title = "Aumento por mes de Alimentos Moderados",
+        subtitle = "Aumento de cada categoría de producto")+
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+
+1.3.EVITAR
+
+1.3.a. Box plot por categoría de alimento del grupo.
+```{r EVI: boxplot de precios por categoria}
+bp3 = ggplot(data=evitar, aes(x=Categoria, y=precio, fill=Categoria)) +
+      geom_boxplot() +
+      scale_fill_brewer(palette="Blues") +
+      ylab("Precio ($AR)") + 
+      xlab("")
+
+bp3 + labs(title = "Precio de Alimentos a Evitar",
+        subtitle = "Precio de cada categoría de producto",
+        caption = "") +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+1.3.b. Gráfico de barras de la proporción de aumento por mes, comparado con inflación.
+```{r EVI: Proporción de aumento}
+# Aumento medio en todo el periodo, por categoría.
+evi_aumento_cat = 
+  (na.omit(evitar %>%
+ group_by(Categoria, nombre, medicion) %>%
+ dplyr::summarise(media = mean(precio)) %>%
+ subset(medicion == 1 | medicion == 10)%>%
+ dplyr::mutate(aumento_total = (media - lag(media))/lag(media))%>%
+ dplyr::arrange(Categoria)) %>%
+
+ group_by(Categoria) %>%
+ dplyr::summarise(media_aumento_total = mean(aumento_total)) %>%
+ dplyr::arrange(Categoria)
+)
+
+# Aumento medio, por medicion.
+evi_aumento_med = 
+ (na.omit(evitar %>%
+ group_by(Categoria, nombre, medicion) %>%
+ dplyr::summarise(media = mean(precio)) %>%
+ subset(medicion == 1 | medicion == 4 | medicion == 6 | medicion == 8 | medicion == 10)%>%
+ dplyr::mutate(aumento_mensual = (media - lag(media))/lag(media))%>%
+ dplyr::arrange(Categoria)) %>%
+   
+ group_by(medicion, Categoria) %>%
+ dplyr::summarise(media_aumento = mean(aumento_mensual)) %>%
+ dplyr::arrange(Categoria)
+)
+
+# Le agregamos la información de inflación
+evi_aumento_med = inner_join(evi_aumento_med, inflacion, by = "medicion")
+
+evi_aumento_cat
+evi_aumento_med
+```
+
+```{r EVI: Gráfico de aumento acumulado por categoría de producto}
+fig3 = ggplot(data=evi_aumento_med, aes(x=Categoria, y=media_aumento, group=periodo, fill=periodo)) + 
+  geom_bar(stat="identity") + 
+  scale_fill_manual(name="Mes", values = ZissouD) +
+  geom_text(aes(label = scales::percent(media_aumento)),position = position_stack(vjust = 0.5), size = 7, colour = "white") + 
+  ylab("") + 
+  xlab("") + 
+  geom_line(aes(x=Categoria,y=alimentos_periodo, color=as.factor(alimentos_periodo)),size=0.5) +
+  scale_color_manual(values = "black", name = "Inflación")
+
+fig3 + labs(title = "Aumento por mes de Alimentos a Evitar",
+        subtitle = "Aumento de cada categoría de producto")+
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+
+
+2. Aumento de precios por barrio
+
+2.1.Aumento por categoría, independientemente del grupo.
+```{r Dataset con los tres grupos de alimentos}
+# Agregado de variable "grupo" al dataset de  trabajo
+recomendados["grupo"] = "recomendado"
+moderados["grupo"] = "moderados"
+evitar["grupo"] = "evitar"
+
+# Creación de un dataset con los 3 grupos de alimentos}
+data1 = bind_rows(bind_rows(recomendados[2:14],moderados[2:14]), evitar[2:14])
+```
+
+```{r REC: Aumento de cada categoria, por barrio}
+# Aumento por barrio, de cada categoria
+data1_aumento_barrio = na.omit(data1 %>%
+ group_by(barrio, Categoria, grupo, nombre, medicion) %>%
+ dplyr::summarise(media = mean(precio)) %>%
+ subset(medicion == 1 | medicion == 10)%>%
+ dplyr::mutate(aumento_total = (media - lag(media))/lag(media))%>%
+ dplyr::arrange(barrio, grupo)) %>%
+
+ group_by(Categoria, barrio, grupo) %>%
+ dplyr::summarise(media_aumento_total = mean(aumento_total)) %>%
+ dplyr::arrange(barrio, desc(media_aumento_total)) %>%
+ group_by(barrio)
+
+# Selecciono las 3 categorías que más aumentaron de cada barrió
+data1_aumento_barrio_3max = top_n(data1_aumento_barrio,5,media_aumento_total)
+
+# Le agregamos el precio del metro cuadrado
+#data1_aumento_barrio_3max = inner_join(data1_aumento_barrio_3max, precio_metros2, by = c("barrio" = "BARRIO"))
+
+data1_aumento_barrio
+data1_aumento_barrio_3max
+```
+
+```{r Gráfico de categorías de mayor aumento, por barrio}
+fig4 =ggplot(data = data1_aumento_barrio_3max,  aes(x = Categoria, y = barrio, fill = media_aumento_total)) + 
+      geom_tile()+
+       coord_equal(ratio=1/2)+
+      scale_fill_gradientn(name="Media aumento", colours = ZissouC)+
+      ylab("") + 
+      xlab("") +
+      geom_point(data=data1_aumento_barrio_3max, aes(x=Categoria, y=barrio, shape=grupo), inherit.aes = F, alpha=0.5,color="gray27") +
+      scale_shape_manual(values=c(8, 4), name="Grupo de alimentos")
+
+fig4 + labs(title = "Categorías de alimentos de máximos aumento",
+        subtitle = "Se muestran las 3 categorías de mayor aumento por barrio"
+        ) +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14, angle=90),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+``` 
+
+
+2.2. Aumento por grupo
+```{r Aumento de cada grupo por barrio}
+# Aumento por barrio, de cada grupo
+data1_aumento_grupo = na.omit(data1 %>%
+ group_by(barrio, grupo, medicion) %>%
+ dplyr::summarise(media = mean(precio)) %>%
+ subset(medicion == 1 | medicion == 10)%>%
+ dplyr::mutate(aumento_total = (media - lag(media))/lag(media))%>%
+ dplyr::arrange(barrio)) %>%
+
+ group_by(grupo, barrio) %>%
+ dplyr::summarise(media_aumento_total = mean(aumento_total)) %>%
+ dplyr::arrange(barrio, desc(media_aumento_total)) %>%
+ group_by(barrio)
+
+# Le agregamos el valor del m2 a cada barrio
+data1_aumento_grupo = inner_join(data1_aumento_grupo, precio_metros2, by = c("barrio"="BARRIO"))
+
+# Separamos por cada grupo
+rec_aumento_grupo = filter(data1_aumento_grupo, grupo %in% "recomendado")
+mod_aumento_grupo = filter(data1_aumento_grupo, grupo %in% "moderados")
+evi_aumento_grupo = filter(data1_aumento_grupo, grupo %in% "evitar")
+
+data1_aumento_grupo
+```
+
+```{r Gráfico de aumento de grupo por barrio}
+fig5 = ggplot(data = data1_aumento_grupo,  aes(x = PRECIO , y = media_aumento_total, color=grupo))+
+              geom_point(size=4, alpha=0.6)+
+              xlim(1000, 4500)+
+              ylab("Media de aumento")+ 
+              xlab("Precio metro cuadrado")+
+              scale_color_manual(name="Grupo de alimentos", values = DarjD)
+              #geom_smooth(method = "lm", se = TRUE, color = "firebrick")
+
+fig5 + labs(title = "Aumento de grupo de Alimentos",
+        subtitle = "aumento de cada grupo en función del precio del metro cuadrado",
+        caption="se eliminó el dato de mayor valor de metro cuadrado (Puerto Madero)"
+        ) +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+```{r Coeficientes de correlación}
+cor(rec_aumento_grupo$PRECIO,rec_aumento_grupo$media_aumento_total)
+cor(mod_aumento_grupo$PRECIO,mod_aumento_grupo$media_aumento_total)
+cor(evi_aumento_grupo$PRECIO,evi_aumento_grupo$media_aumento_total)
+```
+
+2.3. Precio medio por grupo
+```{r Precio medio de cada grupo por barrio}
+# Precio medio por barrio, de cada grupo (medición 1)
+data1_precio_grupo1 = 
+na.omit(data1 %>%
+group_by(barrio, grupo) %>%
+subset(medicion == 1)%>%
+dplyr::summarise(media = mean(precio)) %>%
+dplyr::arrange(barrio))
+
+# Le agregamos el valor del m2 a cada barrio
+data1_precio_grupo1 = inner_join(data1_precio_grupo1, precio_metros2, by = c("barrio"="BARRIO"))
+
+# Precio medio por barrio, de cada grupo (medición 10)
+data1_precio_grupo10 = 
+na.omit(data1 %>%
+group_by(barrio, grupo) %>%
+subset(medicion == 10)%>%
+dplyr::summarise(media = mean(precio)) %>%
+dplyr::arrange(barrio))
+
+# Le agregamos el valor del m2 a cada barrio
+data1_precio_grupo10 = inner_join(data1_precio_grupo10, precio_metros2, by = c("barrio"="BARRIO"))
+
+data1_precio_grupo1
+data1_precio_grupo10
+```
+
+```{r}
+fig6 = ggplot(data = data1_precio_grupo1,  aes(x = PRECIO , y = media, color=grupo))+
+              geom_point(size=4, alpha=0.6)+
+              xlim(1000, 4500)+
+              ylab("Media de precio")+ 
+              xlab("Precio metro cuadrado")+
+              scale_color_manual(name="Grupo de alimentos", values = DarjD)
+              #geom_smooth(method = "lm", se = TRUE, color = "firebrick")
+
+fig6 + labs(title = "Precio medio de grupo de Alimentos (Noviembre 2018)",
+        subtitle = "precio medio de cada grupo en función del precio del metro cuadrado",
+        caption="se eliminó el dato de mayor valor de metro cuadrado (Puerto Madero)"
+        ) +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+
+fig7 = ggplot(data = data1_precio_grupo10,  aes(x = PRECIO , y = media, color=grupo))+
+              geom_point(size=4, alpha=0.6)+
+              xlim(1000, 4500)+
+              ylab("Media de precio")+ 
+              xlab("Precio metro cuadrado")+
+              scale_color_manual(name="Grupo de alimentos", values = DarjD)
+              #geom_smooth(method = "lm", se = TRUE, color = "firebrick")
+
+fig7 + labs(title = "Precio medio de grupo de Alimentos (Febrero 2019)",
+        subtitle = "precio medio de cada grupo en función del precio del metro cuadrado",
+        caption="se eliminó el dato de mayor valor de metro cuadrado (Puerto Madero)"
+        ) +
+                      theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face="bold"),    
+    plot.subtitle = element_text(hjust = 0.5, size = 22),            
+    plot.caption = element_text(hjust = 0, face = "italic", size=14),
+    axis.text.x = element_text(size =14),
+    axis.text.y = element_text(size =14),
+    axis.title=element_text(size=14),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20)
+    )
+```
+
+```{r Varianza de cada grupo}
+data1 %>% 
+group_by(grupo, medicion) %>%
+subset(medicion == 1 | medicion == 4 | medicion == 6  |medicion == 10 )%>%
+dplyr::summarise(Varianza = var(precio)) %>%
+dplyr::arrange(grupo, medicion)
+
+data1 %>% 
+group_by(grupo, medicion) %>%
+subset(medicion == 1 | medicion == 4 | medicion == 6  |medicion == 10 )%>%
+dplyr::summarise(media = mean(precio)) %>%
+dplyr::arrange(grupo, medicion)
+```
+
+
+```{r Bebidas deportivas}
+evi_bebidasdep =
+data1 %>%
+group_by(Categoria, medicion) %>%
+subset(Categoria == "Bebidas deportivas")%>%
+dplyr::arrange(medicion)
+
+evi_bebidasdep
+```
+
+
