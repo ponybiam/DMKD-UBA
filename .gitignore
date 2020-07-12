@@ -1,0 +1,8 @@
+.venv
+.vscode
+.DS_Store
+.ipynb_checkpoints/
+__pycache__/
+temp/
+.Rproj.user
+R-project/
